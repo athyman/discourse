@@ -25,8 +25,6 @@ class ReviewableFlaggedPost < Reviewable
 
   def perform_agree(performed_by, args)
 
-    # TODO: We can remove most of the post action stuff eventually, it's
-    # covered by reviewable
     actions = PostAction.active
       .where(post_id: target_id)
       .where(post_action_type_id: PostActionType.notify_flag_types.values)
@@ -41,8 +39,7 @@ class ReviewableFlaggedPost < Reviewable
       trigger_spam = true if action.post_action_type_id == PostActionType.types[:spam]
     end
 
-    # Update the flags_agreed user stat
-    UserStat.where(user_id: actions.map(&:user_id)).update_all("flags_agreed = flags_agreed + 1")
+    update_flag_stats(:agreed, actions.map(&:user_id))
 
     DiscourseEvent.trigger(:confirmed_spam_post, post) if trigger_spam
 
@@ -57,13 +54,10 @@ class ReviewableFlaggedPost < Reviewable
 
     PostAction.update_flagged_posts_count
 
-    create_result(:success, :approved)
+    create_result(:success, :approved) { |result| result.recalculate_score = true }
   end
 
   def perform_disagree(performed_by, args)
-
-    # TODO: We can remove most of the post action stuff eventually, it's
-    # covered by reviewable
 
     # -1 is the automatic system cleary
     action_type_ids =
@@ -83,8 +77,7 @@ class ReviewableFlaggedPost < Reviewable
       action.add_moderator_post_if_needed(performed_by, :disagreed)
     end
 
-    # Update the flags_disagreed user stat
-    UserStat.where(user_id: actions.map(&:user_id)).update_all("flags_disagreed = flags_disagreed + 1")
+    update_flag_stats(:disagreed, actions.map(&:user_id))
 
     # reset all cached counters
     cached = {}
@@ -108,13 +101,11 @@ class ReviewableFlaggedPost < Reviewable
       UserSilencer.unsilence(post.user) if UserSilencer.was_silenced_for?(post)
     end
 
-    create_result(:success, :rejected)
+    create_result(:success, :rejected) { |result| result.recalculate_score = true }
   end
 
   def perform_ignore(performed_by, args)
 
-    # TODO: We can remove most of the post action stuff eventually, it's
-    # covered by reviewable
     actions = PostAction.active
       .where(post_id: target_id)
       .where(post_action_type_id: PostActionType.notify_flag_type_ids)
@@ -127,14 +118,33 @@ class ReviewableFlaggedPost < Reviewable
       action.add_moderator_post_if_needed(performed_by, :deferred, args[:delete_post])
     end
 
+    update_flag_stats(:ignored, actions.map(&:user_id))
+
     if actions.first.present?
       DiscourseEvent.trigger(:flag_reviewed, post)
       DiscourseEvent.trigger(:flag_deferred, actions.first)
     end
 
     PostAction.update_flagged_posts_count
-    create_result(:success, :ignored)
+    create_result(:success, :ignored) { |result| result.recalculate_score = true }
   end
+
+  def update_flag_stats(status, user_ids)
+    return unless [:agreed, :disagreed, :ignored].include?(status)
+
+    result = DB.query(<<~SQL, user_ids: user_ids)
+      UPDATE user_stats
+      SET flags_#{status} = flags_#{status} + 1
+      WHERE user_id IN (:user_ids)
+      RETURNING user_id, flags_agreed + flags_disagreed + flags_ignored AS total
+    SQL
+
+    Jobs.enqueue(
+      :truncate_user_flag_stats,
+      user_ids: result.select { |r| r.total > Jobs::TruncateUserFlagStats.truncate_to }.map(&:user_id)
+    )
+  end
+
 end
 
 # == Schema Information

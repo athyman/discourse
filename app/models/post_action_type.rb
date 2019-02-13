@@ -22,21 +22,21 @@ class PostActionType < ActiveRecord::Base
           3,
           :off_topic,
           notify_type: true,
-          auto_action_type: true
+          auto_action_type: true,
         )
         @flag_settings.add(
           4,
           :inappropriate,
           topic_type: true,
           notify_type: true,
-          auto_action_type: true
+          auto_action_type: true,
         )
         @flag_settings.add(
           8,
           :spam,
           topic_type: true,
           notify_type: true,
-          auto_action_type: true
+          auto_action_type: true,
         )
         @flag_settings.add(
           6,
@@ -131,5 +131,3 @@ end
 #  created_at :datetime         not null
 #  updated_at :datetime         not null
 #  id         :integer          not null, primary key
-#  position   :integer          default(0), not null
-#

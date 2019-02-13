@@ -68,13 +68,19 @@ class Reviewable < ActiveRecord::Base
     find_by(target: target).tap { |r| r.log_history(:transitioned, created_by) }
   end
 
-  def add_score(user, reviewable_score_type)
-    reviewable_scores.create!(
+  def add_score(user, reviewable_score_type, created_at: nil)
+    score_bonus = PostActionType.where(id: reviewable_score_type).pluck(:score_bonus)[0]
+
+    rs = reviewable_scores.create!(
       user: user,
       status: ReviewableScore.statuses[:pending],
       reviewable_score_type: reviewable_score_type,
-      score: 1.0
+      score: ReviewableScore.user_flag_score(user) + score_bonus,
+      created_at: created_at || Time.zone.now
     )
+
+    self.score = self.score + rs.score
+    save
   end
 
   def history
@@ -145,8 +151,9 @@ class Reviewable < ActiveRecord::Base
       increment_version!(args[:version])
       result = send(perform_method, performed_by, args)
 
-      if result.success? && result.transition_to
-        transition_to(result.transition_to, performed_by)
+      if result.success?
+        transition_to(result.transition_to, performed_by) if result.transition_to
+        recalculate_score if result.recalculate_score
       end
     end
     result
@@ -228,7 +235,37 @@ class Reviewable < ActiveRecord::Base
     result
   end
 
+  def self.scores_with_topics
+    ReviewableScore.joins(reviewable: :topic).where("reviewables.type = ?", name)
+  end
+
+  def self.count_by_date(start_date, end_date, category_id = nil)
+    scores_with_topics
+      .where('reviewable_scores.created_at BETWEEN ? AND ?', start_date, end_date)
+      .where("topics.category_id = COALESCE(?, topics.category_id)", category_id)
+      .group("date(reviewable_scores.created_at)")
+      .order('date(reviewable_scores.created_at)')
+      .count
+  end
+
 protected
+
+  def recalculate_score
+    # Recalculate the pending score and return it
+    result = DB.query(<<~SQL, id: self.id, pending: ReviewableScore.statuses[:pending])
+      UPDATE reviewables
+      SET score = COALESCE((
+        SELECT sum(score)
+        FROM reviewable_scores AS rs
+        WHERE rs.reviewable_id = :id
+          AND rs.status = :pending
+      ), 0.0)
+      WHERE id = :id
+      RETURNING score
+    SQL
+
+    self.score = result[0].score
+  end
 
   def increment_version!(version = nil)
     version_result = nil
